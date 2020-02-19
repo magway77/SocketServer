@@ -7,15 +7,20 @@
 
 #include "pch.h"
 #include "ConnectedClient.h"
+#include "SocketListenerException.h"
 
 class SocketListener {
 private:
 
-    uint16_t m_port = 12340;
+    uint16_t m_port;
 
-    int m_maxClients = 30;
+    int m_maxClients;
 
-    vector<ConnectedClient> m_connectedClients;
+    int master_socket;
+
+    vector<ConnectedClient> connectedClients;
+
+    int createMasterSocket(const struct sockaddr_in &address) throw(SocketListenerException);
 
 protected:
 public:
@@ -23,7 +28,7 @@ public:
 
     virtual ~SocketListener();
 
-    void start();
+    void start() throw(SocketListenerException);
 
     void stop();
 

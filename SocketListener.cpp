@@ -3,17 +3,18 @@
 //
 
 #include "SocketListener.h"
-#include <unistd.h>   //close
-#include <arpa/inet.h>    //close
+#include <unistd.h>   //closeConnection
+#include <arpa/inet.h>    //closeConnection
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
-#include <sys/time.h> //FD_SET, FD_ISSET, FD_ZERO macros
 
 #define OPT_TRUE   1
-#define OPT_FALSE  0
 
-SocketListener::SocketListener() {
+SocketListener::SocketListener() :
+        m_port(12340),
+        m_maxClients(30),
+        master_socket(0) {
 
 }
 
@@ -21,81 +22,46 @@ SocketListener::~SocketListener() {
     stop();
 }
 
-void SocketListener::start() {
-    int opt = OPT_TRUE;
-    int master_socket, addrlen, new_socket, client_socket[30], activity, i, valread, sd;
-    int max_sd;
-    struct sockaddr_in address;
+void SocketListener::start() throw(SocketListenerException) {
+
+    int new_socket, activity, i, valread, sd;
 
     char buffer[1025];  //data buffer of 1K
 
     //set of socket descriptors
     fd_set readfds;
 
-    //a message
-    char *message = "ECHO Daemon v1.0 \r\n";
-
-    //initialise all client_socket[] to 0 so not checked
-    for (i = 0; i < m_maxClients; i++) {
-        client_socket[i] = 0;
-    }
-
-    //create a master socket
-    if ((master_socket = socket(AF_INET, SOCK_STREAM, 0)) == 0) {
-        perror("socket failed");
-        exit(EXIT_FAILURE);
-    }
-
-    //set master socket to allow multiple connections ,
-    //this is just a good habit, it will work without this
-    if (setsockopt(master_socket, SOL_SOCKET, SO_REUSEADDR, (char *) &opt,
-                   sizeof(opt)) < 0) {
-        perror("setsockopt");
-        exit(EXIT_FAILURE);
-    }
-
+    const char *message = "ECHO Daemon v1.0 \r\n";
     //type of socket created
+    struct sockaddr_in address = {};
     address.sin_family = AF_INET;
     address.sin_addr.s_addr = INADDR_ANY;
     address.sin_port = htons(m_port);
 
-    //bind the socket to localhost port 8888
-    if (bind(master_socket, (struct sockaddr *) &address, sizeof(address)) < 0) {
-        perror("bind failed");
-        exit(EXIT_FAILURE);
-    }
-    printf("Listener on port %d \n", m_port);
+    master_socket = createMasterSocket(address);
 
-    //try to specify maximum of 3 pending connections for the master socket
-    if (listen(master_socket, 3) < 0) {
-        perror("listen");
-        exit(EXIT_FAILURE);
-    }
 
     //accept the incoming connection
-    addrlen = sizeof(address);
+    int addrlen = sizeof(address);
     puts("Waiting for connections ...");
 
+    int max_sd;
     while (true) {
         //clear the socket set
         FD_ZERO(&readfds);
 
-        //add master socket to set
         FD_SET(master_socket, &readfds);
         max_sd = master_socket;
 
         //add child sockets to set
-        for (i = 0; i < m_maxClients; i++) {
-            //socket descriptor
-            sd = client_socket[i];
-
-            //if valid socket descriptor then add to read list
-            if (sd > 0)
+        for (i = 0; i < connectedClients.size(); i++) {
+            sd = connectedClients[i].getClientSocket();
+            if (sd > 0) {
                 FD_SET(sd, &readfds);
-
-            //highest file descriptor number, need it for the select function
-            if (sd > max_sd)
+            }
+            if (sd > max_sd) {
                 max_sd = sd;
+            }
         }
 
         //wait for an activity on one of the sockets , timeout is NULL ,
@@ -109,10 +75,8 @@ void SocketListener::start() {
         //If something happened on the master socket ,
         //then its an incoming connection
         if (FD_ISSET(master_socket, &readfds)) {
-            if ((new_socket = accept(master_socket,
-                                     (struct sockaddr *) &address, (socklen_t *) &addrlen)) < 0) {
-                perror("accept");
-                exit(EXIT_FAILURE);
+            if ((new_socket = accept(master_socket, (struct sockaddr *) &address, (socklen_t *) &addrlen)) < 0) {
+                throw SocketListenerException("accept");
             }
 
             //inform user of socket number - used in send and receive commands
@@ -121,26 +85,19 @@ void SocketListener::start() {
 
             //send new connection greeting message
             if (send(new_socket, message, strlen(message), 0) != strlen(message)) {
-                perror("send");
+                throw SocketListenerException("send");
             }
 
             puts("Welcome message sent successfully");
 
-            //add new socket to array of sockets
-            for (i = 0; i < m_maxClients; i++) {
-                //if position is empty
-                if (client_socket[i] == 0) {
-                    client_socket[i] = new_socket;
-                    printf("Adding to list of sockets as %d\n", i);
-
-                    break;
-                }
+            if (connectedClients.size() < m_maxClients) {
+                connectedClients.push_back(ConnectedClient(new_socket));
             }
         }
 
         //else its some IO operation on some other socket
-        for (i = 0; i < m_maxClients; i++) {
-            sd = client_socket[i];
+        for (i = 0; i < connectedClients.size(); i++) {
+            sd = connectedClients[i].getClientSocket();
 
             if (FD_ISSET(sd, &readfds)) {
                 //Check if it was for closing , and also read the
@@ -151,16 +108,10 @@ void SocketListener::start() {
                     printf("Host disconnected , ip %s , port %d \n", inet_ntoa(address.sin_addr),
                            ntohs(address.sin_port));
 
-                    //Close the socket and mark as 0 in list for reuse
-                    close(sd);
-                    client_socket[i] = 0;
-                }
-
-                    //Echo back the message that came in
-                else {
-                    //set the string terminating NULL byte on the end
-                    //of the data read
-                    char *answer = "answer: ";
+                    connectedClients[i].closeConnection();
+                    connectedClients.erase(connectedClients.begin() + i);
+                } else {
+                    const char *answer = "answer: ";
                     if (send(new_socket, answer, strlen(answer), 0) != strlen(answer)) {
                         perror("send");
                     }
@@ -174,5 +125,33 @@ void SocketListener::start() {
 }
 
 void SocketListener::stop() {
+    connectedClients.clear();
+    close(master_socket);
+}
 
+int SocketListener::createMasterSocket(const struct sockaddr_in &address) throw(SocketListenerException) {
+    int master_socket = 0;
+    if ((master_socket = socket(AF_INET, SOCK_STREAM, 0)) == 0) {
+        throw SocketListenerException("socket failed");
+    }
+
+    //set master socket to allow multiple connections ,
+    //this is just a good habit, it will work without this
+    int opt = OPT_TRUE;
+    if (setsockopt(master_socket, SOL_SOCKET, SO_REUSEADDR, (char *) &opt, sizeof(opt)) < 0) {
+        throw SocketListenerException("setsockopt");
+    }
+
+    //bind the socket to localhost port 8888
+    if (bind(master_socket, (struct sockaddr *) &address, sizeof(address)) < 0) {
+        throw SocketListenerException("bind failed");
+    }
+    printf("Listener on port %d \n", m_port);
+
+    //try to specify maximum of 3 pending connections for the master socket
+    if (listen(master_socket, 3) < 0) {
+        throw SocketListenerException("listen");
+    }
+
+    return master_socket;
 }

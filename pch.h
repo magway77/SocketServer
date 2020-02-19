@@ -12,6 +12,8 @@
 #include <memory>
 #include <cstring>
 #include <vector>
+#include <stdexcept>
+#include <inttypes.h>
 
 using namespace std;
 #endif //SH_PCH_H

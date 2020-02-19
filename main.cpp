@@ -3,6 +3,11 @@
 
 int main(int argc, char *argv[]) {
     SocketListener socketServer;
-    socketServer.start();
-    return 0;
+    try {
+        socketServer.start();
+    } catch (SocketListenerException &e) {
+        perror(e.what());
+        exit(EXIT_FAILURE);
+    }
+    return EXIT_SUCCESS;
 }
